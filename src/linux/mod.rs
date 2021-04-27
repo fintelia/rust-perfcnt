@@ -252,12 +252,15 @@ impl PerfCounterBuilderLinux {
         };
         config |= (counter.counter_mask as u64) << 24;
 
+	config |= 0x3 << 16; // user and system level
+
         if counter.edge_detect {
             config |= 1 << 18;
         }
         if counter.any_thread {
             config |= 1 << 21;
         }
+	// config |= 1 << 22; // enable
         if counter.invert {
             config |= 1 << 23;
         }
@@ -666,6 +669,7 @@ impl PerfCounterBuilderLinux {
             self.flags,
         ) as ::libc::c_int;
         if fd < 0 {
+	    println!("fd = {}", fd);
             return Err(Error::from_raw_os_error(-fd));
         }
 
@@ -709,30 +713,31 @@ impl FileReadFormat {
 #[repr(C)]
 pub struct MMAPPage {
     /// version number of this structure
-    version: u32,
+    pub version: u32,
     /// lowest version this is compat with
-    compat_version: u32,
+    pub compat_version: u32,
     /// seqlock for synchronization
-    lock: u32,
+    pub lock: u32,
     /// hardware counter identifier
-    index: u32,
+    pub index: u32,
     /// add to hardware counter value
-    offset: i64,
+    pub offset: i64,
     /// time event active
-    time_enabled: u64,
+    pub time_enabled: u64,
     /// time event on CPU
-    time_running: u64,
-    capabilities: u64,
-    pmc_width: u16,
-    time_shift: u16,
-    time_mult: u32,
-    time_offset: u64,
+    pub time_running: u64,
+    pub capabilities: u64,
+    pub pmc_width: u16,
+    pub time_shift: u16,
+    pub time_mult: u32,
+    pub time_offset: u64,
+    pub time_zero: u64,
     /// Pad to 1k
-    reserved: [u64; 120],
+    reserved: [u64; 119],
     /// head in the data section
-    data_head: u64,
+    pub data_head: u64,
     /// user-space written tail
-    data_tail: u64,
+    pub data_tail: u64,
 }
 
 impl fmt::Debug for MMAPPage {
@@ -748,6 +753,7 @@ impl fmt::Debug for MMAPPage {
 pub struct PerfCounter {
     fd: ::libc::c_int,
     file: File,
+    #[allow(unused)]
     attributes: perf_format::EventAttr,
 }
 
@@ -762,6 +768,20 @@ impl PerfCounter {
             Ok(value)
         }
     }
+
+    pub fn mmap_header(&self) -> mmap::MemoryMap {
+        mmap::MemoryMap::new(
+            4096,
+            &[
+                mmap::MapOption::MapFd(self.fd),
+                mmap::MapOption::MapOffset(0),
+                mmap::MapOption::MapNonStandardFlags(MAP_SHARED),
+                mmap::MapOption::MapReadable,
+            ],
+        )
+        .unwrap()
+    }
+
 }
 
 impl<'a> AbstractPerfCounter for PerfCounter {
@@ -796,9 +816,11 @@ impl<'a> AbstractPerfCounter for PerfCounter {
 }
 
 pub struct SamplingPerfCounter {
+    #[allow(unused)]
     pc: PerfCounter,
     map: mmap::MemoryMap,
     events_size: usize,
+    tmp_buffer: Box<[u8]>,
 }
 
 unsafe fn read<U: Copy>(ptr: *const u8, offset: isize) -> U {
@@ -1082,26 +1104,28 @@ struct BranchEntry {
 #[derive(Debug)]
 pub struct SampleRecord {
     header: EventHeader,
+    /// if PERF_SAMPLE_IDENTIFIER
+    pub id: u64,
     /// if PERF_SAMPLE_IP
-    ip: u64,
+    pub ip: u64,
     /// if PERF_SAMPLE_TID
-    pid: u32,
+    pub pid: u32,
     /// if PERF_SAMPLE_TID
-    tid: u32,
+    pub tid: u32,
     /// if PERF_SAMPLE_TIME
-    time: u64,
+    pub time: u64,
     /// if PERF_SAMPLE_ADDR
-    addr: u64,
+    pub addr: u64,
     /// if PERF_SAMPLE_ID
-    id: u64,
+    pub id2: u64,
     /// if PERF_SAMPLE_STREAM_ID
-    stream_id: u64,
+    pub stream_id: u64,
     /// if PERF_SAMPLE_CPU
-    cpu: u32,
+    pub cpu: u32,
     /// if PERF_SAMPLE_CPU
-    res: u32,
+    pub res: u32,
     /// if PERF_SAMPLE_PERIOD
-    period: u64,
+    pub period: u64,
 
     /// if PERF_SAMPLE_READ
     /// # TODO
@@ -1110,51 +1134,52 @@ pub struct SampleRecord {
 
     //u64   nr;         /* if PERF_SAMPLE_CALLCHAIN */
     //u64   ips[nr];    /* if PERF_SAMPLE_CALLCHAIN */
-    ips: Vec<u64>,
+    pub ips: Vec<u64>,
 
     /// u32   size;       /* if PERF_SAMPLE_RAW */
     /// char  data[size]; /* if PERF_SAMPLE_RAW */
-    raw_sample: Vec<u8>,
+    pub raw_sample: Vec<u8>,
 
     /// u64   bnr;        /* if PERF_SAMPLE_BRANCH_STACK */
     /// struct perf_branch_entry lbr[bnr];
     lbr: Vec<BranchEntry>,
 
     /// u64   abi;        /* if PERF_SAMPLE_REGS_USER */
-    abi: u64,
+    pub abi: u64,
 
     ///  u64   regs[weight(mask)];
     /// if PERF_SAMPLE_REGS_USER
-    regs: Vec<u64>,
+    pub regs: Vec<u64>,
 
     /// u64   size;       /* if PERF_SAMPLE_STACK_USER */
     /// char  data[size]; /* if PERF_SAMPLE_STACK_USER */
-    user_stack: Vec<u8>,
+    pub user_stack: Vec<u8>,
 
     /// u64   dyn_size;   /* if PERF_SAMPLE_STACK_USER */
-    dyn_size: u64,
+    pub dyn_size: u64,
     /// u64   weight;     /* if PERF_SAMPLE_WEIGHT */
-    weight: u64,
+    pub weight: u64,
     /// u64   data_src;   /* if PERF_SAMPLE_DATA_SRC */
-    data_str: u64,
+    pub data_str: u64,
 }
 
 impl SampleRecord {
     unsafe fn copy_from_raw_ptr(ptr: *const u8) -> SampleRecord {
         let header: EventHeader = EventHeader::copy_from_raw_ptr(ptr);
-        let ip: u64 = read(ptr, 8);
-        let pid: u32 = read(ptr, 16);
-        let tid: u32 = read(ptr, 20);
-        let time: u64 = read(ptr, 24);
-        let addr: u64 = read(ptr, 32);
-        let id: u64 = read(ptr, 40);
-        let stream_id: u64 = read(ptr, 48);
-        let cpu: u32 = read(ptr, 52);
-        let res: u32 = read(ptr, 56);
-        let period: u64 = read(ptr, 64);
+        let id: u64 = 0;//read(ptr, 8);
+        let ip: u64 = read(ptr, 16);
+        let pid: u32 = read(ptr, 24);
+        let tid: u32 = read(ptr, 28);
+        let time: u64 = read(ptr, 32);
+        let addr: u64 = 0;//read(ptr, 40);
+        let id2: u64 = 0;//read(ptr, 40);
+        let stream_id: u64 = 0;//read(ptr, 48);
+        let cpu: u32 = 0;//read(ptr, 52);
+        let res: u32 = 0;//read(ptr, 56);
+        let period: u64 = 0;//read(ptr, 64);
 
         // TODO:
-        let v: FileReadFormat = FileReadFormat::copy_from_raw_ptr(ptr.offset(72));
+        let v: FileReadFormat = Default::default();//FileReadFormat::copy_from_raw_ptr(ptr.offset(72));
         let ips: Vec<u64> = Vec::new();
         let raw_sample: Vec<u8> = Vec::new();
         let lbr: Vec<BranchEntry> = Vec::new();
@@ -1173,6 +1198,7 @@ impl SampleRecord {
             time,
             addr,
             id,
+	    id2,
             stream_id,
             cpu,
             res,
@@ -1214,12 +1240,21 @@ impl Iterator for SamplingPerfCounter {
     ///  * We need to advance the tail pointer to make space for new events.
     fn next(&mut self) -> Option<Event> {
         if self.header().data_tail < self.header().data_head {
-            let offset: isize = (self.header().data_tail as usize % self.events_size) as isize;
+            let offset: usize = (self.header().data_tail as usize % self.events_size) as usize;
 
-            let mut bytes_read = 0;
-            let event_ptr = unsafe { self.events().offset(offset) };
-            let event: EventHeader = unsafe { EventHeader::copy_from_raw_ptr(event_ptr) };
-            bytes_read += mem::size_of::<EventHeader>() as u64;
+            let slice = unsafe { std::slice::from_raw_parts(self.events(), self.events_size) };
+            let event_size = unsafe { (&slice[(offset + 6) % self.events_size..] as *const _ as *const u16).read() };
+
+            let event_slice = if offset + usize::from((event_size)) > self.events_size {
+                self.tmp_buffer[0..(self.events_size - offset)].copy_from_slice(&slice[offset..self.events_size]);
+                self.tmp_buffer[(self.events_size - offset)..usize::from(event_size)].copy_from_slice(&slice[..(usize::from(event_size) - (self.events_size - offset))]);
+                &*self.tmp_buffer
+            } else {
+                &slice[offset..][..usize::from(event_size)]
+            };
+
+            let event_ptr = event_slice.as_ptr();
+            let event: EventHeader = unsafe { EventHeader::copy_from_raw_ptr(event_ptr) };            
 
             let record = match event.event_type {
                 perf_event::PERF_RECORD_MMAP => {
@@ -1265,15 +1300,15 @@ impl Iterator for SamplingPerfCounter {
                     // XXX: Not described in the man page?
                     unreachable!();
                 }
-                _ => {
-                    panic!("Unknown type!");
+                ty => {
+                    panic!("Unknown type! {:x?}", ty);
                 }
             };
 
             //bytes_read += size;
 
             let header = self.mut_header();
-            header.data_tail = bytes_read;
+            header.data_tail += u64::from(event.size);
 
             record
         } else {
@@ -1292,18 +1327,20 @@ impl SamplingPerfCounter {
                 mmap::MapOption::MapOffset(0),
                 mmap::MapOption::MapNonStandardFlags(MAP_SHARED),
                 mmap::MapOption::MapReadable,
+                mmap::MapOption::MapWritable,
             ],
         )
         .unwrap();
 
         SamplingPerfCounter {
-            pc,
+            pc: pc,
             map: res,
             events_size: 16 * 4096,
+            tmp_buffer: vec![0; 4096].into_boxed_slice(),
         }
     }
 
-    fn header(&self) -> &MMAPPage {
+    pub fn header(&self) -> &MMAPPage {
         unsafe { mem::transmute::<*mut u8, &MMAPPage>(self.map.data()) }
     }
 
